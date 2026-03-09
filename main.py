@@ -39,9 +39,11 @@ def send_to_vow(pooled_orders):
     print("Sending pooled order to VOW...")
     print(json.dumps(pooled_orders, indent=2))
 
+
 @app.get("/debug-pool")
 def debug_pool():
     return load_pool()
+
 
 # ---------------------------
 # Main Webhook Endpoint
@@ -59,15 +61,36 @@ async def pooled_order(
     created_by: str = Form(None)
 ):
 
+    # ---------------------------
+    # Normalise missing fields
+    # ---------------------------
+
+    # Wix Automations often sends None for these
+    payment_status = payment_status or "PAID"  # assume paid unless told otherwise
+    fulfillment_method = fulfillment_method or "PICKUP"  # assume pickup
+    created_by = created_by or "USER"
+
+    # Convert total safely
+    try:
+        total_value = float(total) if total else 0.0
+    except:
+        total_value = 0.0
+
+    # Parse items JSON if present
+    try:
+        parsed_items = json.loads(items) if items else []
+    except:
+        parsed_items = []
+
     # Allow admins to place unpaid orders
-    admin_override = created_by == "ADMIN"
+    admin_override = created_by.upper() == "ADMIN"
 
     # Customers must pay online
-    if not admin_override and payment_status != "PAID":
+    if not admin_override and payment_status.upper() != "PAID":
         return {"status": "ignored", "reason": "Customer order not paid"}
 
     # Only process in-store collection
-    if fulfillment_method != "PICKUP":
+    if fulfillment_method.upper() != "PICKUP":
         return {"status": "ignored", "reason": "Not in-store collection"}
 
     # Load pool
@@ -79,8 +102,8 @@ async def pooled_order(
         "createdAt": createdAt,
         "customerName": customerName,
         "email": email,
-        "total": total,
-        "items": items,
+        "total": total_value,
+        "items": parsed_items,
         "payment_status": payment_status,
         "created_by": created_by
     }
@@ -89,14 +112,18 @@ async def pooled_order(
     save_pool(pool)
 
     # Check £100 threshold
-    total_value = sum(float(o["total"]) for o in pool)
-    if total_value >= THRESHOLD:
+    running_total = sum(float(o["total"]) for o in pool)
+    if running_total >= THRESHOLD:
         send_to_vow(pool)
         save_pool([])
         return {"status": "sent", "reason": "Threshold £100 reached"}
 
     # Check 2 business days
-    first_order_time = datetime.fromisoformat(pool[0]["createdAt"].replace("Z", "+00:00"))
+    try:
+        first_order_time = datetime.fromisoformat(pool[0]["createdAt"].replace("Z", "+00:00"))
+    except:
+        first_order_time = datetime.utcnow()
+
     now = datetime.utcnow()
 
     if business_days_between(first_order_time, now) >= 2:
@@ -108,5 +135,5 @@ async def pooled_order(
     return {
         "status": "pooled",
         "reason": "Waiting for threshold or 2 business days",
-        "current_total": total_value
+        "current_total": running_total
     }
