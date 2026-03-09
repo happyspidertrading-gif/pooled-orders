@@ -39,6 +39,9 @@ def send_to_vow(pooled_orders):
     print("Sending pooled order to VOW...")
     print(json.dumps(pooled_orders, indent=2))
 
+@app.get("/debug-pool")
+def debug_pool():
+    return load_pool()
 
 # ---------------------------
 # Main Webhook Endpoint
