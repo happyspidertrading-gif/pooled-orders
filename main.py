@@ -35,7 +35,6 @@ def business_days_between(start: datetime, end: datetime):
 
 
 def send_to_vow(pooled_orders):
-    # TODO: Replace with real VOW integration
     print("Sending pooled order to VOW...")
     print(json.dumps(pooled_orders, indent=2))
 
@@ -53,14 +52,12 @@ async def pooled_order(
     orderId: str = Form(None),
     createdAt: str = Form(None),
 
-    # POS name fields
     customerName_first: str = Form(None),
     customerName_last: str = Form(None),
 
     email: str = Form(None),
     total: str = Form(None),
 
-    # POS item fields (single item only)
     item_name: str = Form(None),
     item_sku: str = Form(None),
     item_quantity: str = Form(None),
@@ -72,24 +69,18 @@ async def pooled_order(
     created_by: str = Form(None)
 ):
 
-    # ---------------------------
-    # Normalise basic fields
-    # ---------------------------
     payment_status = (payment_status or "").upper()
     fulfillment_status = (fulfillment_status or "").upper()
     sales_channel = (sales_channel or "").lower()
     created_by = (created_by or "").upper()
 
-    # Combine first + last name
     customerName = f"{customerName_first or ''} {customerName_last or ''}".strip()
 
-    # Convert total safely
     try:
         total_value = float(total) if total else 0.0
     except:
         total_value = 0.0
 
-    # Build POS item list (single item)
     parsed_items = []
     if item_name or item_sku or item_quantity or item_price:
         parsed_items.append({
@@ -100,26 +91,19 @@ async def pooled_order(
         })
 
     # ---------------------------
-    # Collection rules
+    # FINAL COLLECTION LOGIC
     # ---------------------------
-    # POS orders are ALWAYS collection orders.
-    is_pos = sales_channel in ["point of sale", "pos"]
+    # Treat ALL orders as collection unless explicitly delivery
+    delivery_statuses = ["DELIVERED", "SHIPPED", "OUT_FOR_DELIVERY", "IN_TRANSIT"]
 
-    # Online orders must explicitly be collection
-    is_online_collection = fulfillment_status in ["PICKUP", "READY_FOR_PICKUP"]
+    is_delivery = fulfillment_status in delivery_statuses
 
-    # Final rule:
-    # - POS → always pooled
-    # - Online pickup → pooled
-    # - Delivery → ignored
-    is_collection = is_pos or is_online_collection
+    if is_delivery:
+        return {"status": "ignored", "reason": "Delivery order"}
 
-    if not is_collection:
-        return {"status": "ignored", "reason": "Not a collection order"}
-
+    # Everything else = collection
     # ---------------------------
-    # Pooling
-    # ---------------------------
+
     pool = load_pool()
 
     order = {
@@ -138,14 +122,12 @@ async def pooled_order(
     pool.append(order)
     save_pool(pool)
 
-    # Check £100 threshold
     running_total = sum(float(o.get("total", 0) or 0) for o in pool)
     if running_total >= THRESHOLD:
         send_to_vow(pool)
         save_pool([])
         return {"status": "sent", "reason": "Threshold £100 reached"}
 
-    # Check 2 business days
     try:
         first_created = pool[0].get("createdAt")
         first_order_time = datetime.fromisoformat(first_created.replace("Z", "+00:00")) if first_created else datetime.utcnow()
@@ -159,7 +141,6 @@ async def pooled_order(
         save_pool([])
         return {"status": "sent", "reason": "2 business days passed"}
 
-    # Otherwise keep pooling
     return {
         "status": "pooled",
         "reason": "Waiting for threshold or 2 business days",
