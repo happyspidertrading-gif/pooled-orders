@@ -50,16 +50,26 @@ def debug_pool():
 # ---------------------------
 @app.post("/pooled-order")
 async def pooled_order(
-    orderId: str = Form(None),               # Order number
-    createdAt: str = Form(None),             # Date created
-    customerName: str = Form(None),          # Billing info → full name
-    email: str = Form(None),                 # Customer email
-    total: str = Form(None),                 # Order total summary → total
-    items: str = Form(None),                 # Ordered items (JSON string)
-    payment_status: str = Form(None),        # Payment status
-    fulfillment_status: str = Form(None),    # Fulfillment status
-    sales_channel: str = Form(None),         # Sales channel type
-    created_by: str = Form(None)             # Status or USER
+    orderId: str = Form(None),
+    createdAt: str = Form(None),
+
+    # POS name fields
+    customerName_first: str = Form(None),
+    customerName_last: str = Form(None),
+
+    email: str = Form(None),
+    total: str = Form(None),
+
+    # POS item fields (single item only)
+    item_name: str = Form(None),
+    item_sku: str = Form(None),
+    item_quantity: str = Form(None),
+    item_price: str = Form(None),
+
+    payment_status: str = Form(None),
+    fulfillment_status: str = Form(None),
+    sales_channel: str = Form(None),
+    created_by: str = Form(None)
 ):
 
     # ---------------------------
@@ -69,4 +79,79 @@ async def pooled_order(
     fulfillment_status = fulfillment_status or "PICKUP"
     created_by = created_by or "USER"
 
+    # Combine first + last name
+    customerName = f"{customerName_first or ''} {customerName_last or ''}".strip()
+
     # Convert total safely
+    try:
+        total_value = float(total) if total else 0.0
+    except:
+        total_value = 0.0
+
+    # Build POS item list
+    parsed_items = []
+    if item_name or item_sku or item_quantity or item_price:
+        parsed_items.append({
+            "name": item_name,
+            "sku": item_sku,
+            "quantity": item_quantity,
+            "price": item_price
+        })
+
+    # Admin override
+    admin_override = created_by.upper() == "ADMIN"
+
+    # Customers must pay online
+    if not admin_override and payment_status.upper() != "PAID":
+        return {"status": "ignored", "reason": "Customer order not paid"}
+
+    # Only process in-store collection
+    if fulfillment_status.upper() not in ["PICKUP", "READY_FOR_PICKUP"]:
+        return {"status": "ignored", "reason": "Not in-store collection"}
+
+    # Load pool
+    pool = load_pool()
+
+    # Add new order
+    order = {
+        "orderId": orderId,
+        "createdAt": createdAt,
+        "customerName": customerName,
+        "email": email,
+        "total": total_value,
+        "items": parsed_items,
+        "payment_status": payment_status,
+        "fulfillment_status": fulfillment_status,
+        "sales_channel": sales_channel,
+        "created_by": created_by
+    }
+
+    pool.append(order)
+    save_pool(pool)
+
+    # Check £100 threshold
+    running_total = sum(float(o["total"]) for o in pool)
+    if running_total >= THRESHOLD:
+        send_to_vow(pool)
+        save_pool([])
+        return {"status": "sent", "reason": "Threshold £100 reached"}
+
+    # Check 2 business days
+    try:
+        first_order_time = datetime.fromisoformat(pool[0]["createdAt"].replace("Z", "+00:00"))
+    except:
+        first_order_time = datetime.utcnow()
+
+    now = datetime.utcnow()
+
+    if business_days_between(first_order_time, now) >= 2:
+        send_to_vow(pool)
+        save_pool([])
+        return {"status": "sent", "reason": "2 business days passed"}
+
+    # Otherwise keep pooling
+    return {
+        "status": "pooled",
+        "reason": "Waiting for threshold or 2 business days",
+        "current_total": running_total
+    }
