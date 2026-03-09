@@ -77,7 +77,7 @@ async def pooled_order(
     # ---------------------------
     payment_status = (payment_status or "").upper()
     fulfillment_status = (fulfillment_status or "").upper()
-    sales_channel = sales_channel or ""
+    sales_channel = (sales_channel or "").lower()
     created_by = (created_by or "").upper()
 
     # Combine first + last name
@@ -100,15 +100,22 @@ async def pooled_order(
         })
 
     # ---------------------------
-    # Collection rule
+    # Collection rules
     # ---------------------------
-    # NEVER ignore collection orders.
-    # Only ignore non-collection orders (e.g. delivery/shipping).
-    if fulfillment_status not in ["PICKUP", "READY_FOR_PICKUP"]:
-        return {"status": "ignored", "reason": "Not a collection order"}
+    # POS orders are ALWAYS collection orders.
+    is_pos = sales_channel in ["point of sale", "pos"]
 
-    # At this point, all collection orders are accepted,
-    # regardless of payment_status, sales_channel, or created_by.
+    # Online orders must explicitly be collection
+    is_online_collection = fulfillment_status in ["PICKUP", "READY_FOR_PICKUP"]
+
+    # Final rule:
+    # - POS → always pooled
+    # - Online pickup → pooled
+    # - Delivery → ignored
+    is_collection = is_pos or is_online_collection
+
+    if not is_collection:
+        return {"status": "ignored", "reason": "Not a collection order"}
 
     # ---------------------------
     # Pooling
