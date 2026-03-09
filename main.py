@@ -73,11 +73,12 @@ async def pooled_order(
 ):
 
     # ---------------------------
-    # Normalise missing fields
+    # Normalise basic fields
     # ---------------------------
-    payment_status = payment_status or "PAID"
-    fulfillment_status = fulfillment_status or "PICKUP"
-    created_by = created_by or "USER"
+    payment_status = (payment_status or "").upper()
+    fulfillment_status = (fulfillment_status or "").upper()
+    sales_channel = sales_channel or ""
+    created_by = (created_by or "").upper()
 
     # Combine first + last name
     customerName = f"{customerName_first or ''} {customerName_last or ''}".strip()
@@ -88,7 +89,7 @@ async def pooled_order(
     except:
         total_value = 0.0
 
-    # Build POS item list
+    # Build POS item list (single item)
     parsed_items = []
     if item_name or item_sku or item_quantity or item_price:
         parsed_items.append({
@@ -98,21 +99,22 @@ async def pooled_order(
             "price": item_price
         })
 
-    # Admin override
-    admin_override = created_by.upper() == "ADMIN"
+    # ---------------------------
+    # Collection rule
+    # ---------------------------
+    # NEVER ignore collection orders.
+    # Only ignore non-collection orders (e.g. delivery/shipping).
+    if fulfillment_status not in ["PICKUP", "READY_FOR_PICKUP"]:
+        return {"status": "ignored", "reason": "Not a collection order"}
 
-    # Customers must pay online
-    if not admin_override and payment_status.upper() != "PAID":
-        return {"status": "ignored", "reason": "Customer order not paid"}
+    # At this point, all collection orders are accepted,
+    # regardless of payment_status, sales_channel, or created_by.
 
-    # Only process in-store collection
-    if fulfillment_status.upper() not in ["PICKUP", "READY_FOR_PICKUP"]:
-        return {"status": "ignored", "reason": "Not in-store collection"}
-
-    # Load pool
+    # ---------------------------
+    # Pooling
+    # ---------------------------
     pool = load_pool()
 
-    # Add new order
     order = {
         "orderId": orderId,
         "createdAt": createdAt,
@@ -130,7 +132,7 @@ async def pooled_order(
     save_pool(pool)
 
     # Check £100 threshold
-    running_total = sum(float(o["total"]) for o in pool)
+    running_total = sum(float(o.get("total", 0) or 0) for o in pool)
     if running_total >= THRESHOLD:
         send_to_vow(pool)
         save_pool([])
@@ -138,8 +140,9 @@ async def pooled_order(
 
     # Check 2 business days
     try:
-        first_order_time = datetime.fromisoformat(pool[0]["createdAt"].replace("Z", "+00:00"))
-    except:
+        first_created = pool[0].get("createdAt")
+        first_order_time = datetime.fromisoformat(first_created.replace("Z", "+00:00")) if first_created else datetime.utcnow()
+    except Exception:
         first_order_time = datetime.utcnow()
 
     now = datetime.utcnow()
